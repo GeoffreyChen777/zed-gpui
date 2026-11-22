@@ -14,7 +14,8 @@ use super::LineWrapper;
 /// A laid out and styled line of text
 #[derive(Default, Debug)]
 pub struct LineLayout {
-    /// The font size for this line
+    /// The font size the line was shaped at. Runs may carry their own size,
+    /// see [`ShapedRun::font_size`].
     pub font_size: Pixels,
     /// The width of the line
     pub width: Pixels,
@@ -33,6 +34,10 @@ pub struct LineLayout {
 pub struct ShapedRun {
     /// The font id for this run
     pub font_id: FontId,
+    /// The font size this run was shaped at, and must be painted at. Equal
+    /// to the line's [`LineLayout::font_size`] unless the run's
+    /// [`crate::TextRun::font_size`] asked for another size.
+    pub font_size: Pixels,
     /// The glyphs that make up this run
     pub glyphs: Vec<ShapedGlyph>,
 }
@@ -119,6 +124,18 @@ impl LineLayout {
             for glyph in &run.glyphs {
                 if glyph.index >= index {
                     return Some(run.font_id);
+                }
+            }
+        }
+        None
+    }
+
+    /// The font size of the run holding the character at the given index.
+    pub fn font_size_for_index(&self, index: usize) -> Option<Pixels> {
+        for run in &self.runs {
+            for glyph in &run.glyphs {
+                if glyph.index >= index {
+                    return Some(run.font_size);
                 }
             }
         }
@@ -819,10 +836,38 @@ fn apply_force_width_to_layout(layout: &mut LineLayout, force_width: Pixels) {
 
 /// A run of text with a single font.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-#[expect(missing_docs)]
 pub struct FontRun {
+    /// The length of the run in utf-8 bytes.
     pub len: usize,
+    /// The font of the run.
     pub font_id: FontId,
+    /// The run's own font size; `None` means the size the line is shaped at.
+    /// Part of the line layout cache key, so lines that differ only in run
+    /// sizes never share a layout.
+    pub font_size: Option<Pixels>,
+}
+
+impl FontRun {
+    /// A run of `len` bytes in `font_id` at the line's font size.
+    pub fn new(len: usize, font_id: FontId) -> Self {
+        Self {
+            len,
+            font_id,
+            font_size: None,
+        }
+    }
+
+    /// Normalizes a requested run size against the line's size: `None` when
+    /// the run has no size of its own or asks for the line's size, so such
+    /// runs merge and cache exactly like runs without a size.
+    pub fn size_override(run_font_size: Option<Pixels>, line_font_size: Pixels) -> Option<Pixels> {
+        run_font_size.filter(|size| *size != line_font_size)
+    }
+
+    /// The size this run is shaped at, given the line's size.
+    pub fn resolved_font_size(&self, line_font_size: Pixels) -> Pixels {
+        self.font_size.unwrap_or(line_font_size)
+    }
 }
 
 trait AsCacheKeyRef {
@@ -987,6 +1032,7 @@ mod tests {
             descent: px(4.),
             runs: vec![ShapedRun {
                 font_id: FontId(0),
+                font_size: px(16.0),
                 glyphs,
             }],
             len: 0,

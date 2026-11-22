@@ -614,6 +614,7 @@ impl DirectWriteState {
                 index_converter: StringIndexConverter::new(text),
                 runs: &mut runs,
                 width: 0.0,
+                font_size,
             };
             text_layout.Draw(
                 Some((&raw mut renderer_context).cast::<c_void>().cast_const()),
@@ -1373,6 +1374,10 @@ struct RendererContext<'t, 'a, 'b> {
     index_converter: StringIndexConverter<'a>,
     runs: &'b mut Vec<ShapedRun>,
     width: f32,
+    /// The line's font size. Per-run font sizes (`FontRun::font_size`) are
+    /// not honoured by the DirectWrite backend yet: every run is shaped and
+    /// painted at the line's size.
+    font_size: Pixels,
 }
 
 #[derive(Debug)]
@@ -1585,7 +1590,11 @@ impl IDWriteTextRenderer_Impl for TextRenderer_Impl {
             }
             glyph_idx += cluster_glyph_count;
         }
-        context.runs.push(ShapedRun { font_id, glyphs });
+        context.runs.push(ShapedRun {
+            font_id,
+            font_size: context.font_size,
+            glyphs,
+        });
         Ok(())
     }
 

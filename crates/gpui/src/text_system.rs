@@ -215,6 +215,7 @@ impl TextSystem {
                 &[FontRun {
                     len: buffer.len(),
                     font_id,
+                    font_size: None,
                 }],
             )
             .width
@@ -554,8 +555,10 @@ impl WindowTextSystem {
                 };
 
                 let font_id = self.resolve_font(&run.font);
+                let run_font_size = FontRun::size_override(run.font_size, font_size);
                 if let Some(font_run) = font_runs.last_mut()
                     && font_id == font_run.font_id
+                    && run_font_size == font_run.font_size
                     && !decoration_changed
                 {
                     font_run.len += run_len_within_line;
@@ -563,6 +566,7 @@ impl WindowTextSystem {
                     font_runs.push(FontRun {
                         len: run_len_within_line,
                         font_id,
+                        font_size: run_font_size,
                     });
                 }
 
@@ -668,8 +672,10 @@ impl WindowTextSystem {
             };
 
             let font_id = self.resolve_font(&run.font);
+            let run_font_size = FontRun::size_override(run.font_size, font_size);
             if let Some(font_run) = font_runs.last_mut()
                 && font_id == font_run.font_id
+                && run_font_size == font_run.font_size
                 && !decoration_changed
             {
                 font_run.len += run.len;
@@ -677,6 +683,7 @@ impl WindowTextSystem {
                 font_runs.push(FontRun {
                     len: run.len,
                     font_id,
+                    font_size: run_font_size,
                 });
             }
         }
@@ -704,6 +711,7 @@ impl WindowTextSystem {
                 &[FontRun {
                     len: buffer.len(),
                     font_id,
+                    font_size: None,
                 }],
                 None,
             )
@@ -750,8 +758,10 @@ impl WindowTextSystem {
             };
 
             let font_id = self.resolve_font(&run.font);
+            let run_font_size = FontRun::size_override(run.font_size, font_size);
             if let Some(font_run) = font_runs.last_mut()
                 && font_id == font_run.font_id
+                && run_font_size == font_run.font_size
                 && !decoration_changed
             {
                 font_run.len += run.len;
@@ -759,6 +769,7 @@ impl WindowTextSystem {
                 font_runs.push(FontRun {
                     len: run.len,
                     font_id,
+                    font_size: run_font_size,
                 });
             }
         }
@@ -812,8 +823,10 @@ impl WindowTextSystem {
             };
 
             let font_id = self.resolve_font(&run.font);
+            let run_font_size = FontRun::size_override(run.font_size, font_size);
             if let Some(font_run) = font_runs.last_mut()
                 && font_id == font_run.font_id
+                && run_font_size == font_run.font_size
                 && !decoration_changed
             {
                 font_run.len += run.len;
@@ -821,6 +834,7 @@ impl WindowTextSystem {
                 font_runs.push(FontRun {
                     len: run.len,
                     font_id,
+                    font_size: run_font_size,
                 });
             }
         }
@@ -997,6 +1011,14 @@ pub struct TextRun {
     pub underline: Option<UnderlineStyle>,
     /// The strikethrough style (if any)
     pub strikethrough: Option<StrikethroughStyle>,
+    /// The font size for this run. `None` (the default) uses the font size the
+    /// whole line is shaped at, so runs without it lay out exactly as before.
+    ///
+    /// A run with its own size is shaped, measured, wrapped and painted at
+    /// that size, on the line's shared baseline. The line's ascent and
+    /// descent are the maximum over all of its runs; the line height is still
+    /// whatever the caller passes when painting (e.g. the text style's).
+    pub font_size: Option<Pixels>,
 }
 
 #[cfg(all(target_os = "macos", test))]
@@ -1202,5 +1224,186 @@ pub fn font_name_with_fallbacks_shared<'a>(
         ".ZedSans" | "Zed Plex Sans" => const { &SharedString::new_static("IBM Plex Sans") },
         ".ZedMono" | "Zed Plex Mono" => const { &SharedString::new_static("Lilex") },
         _ => name,
+    }
+}
+
+#[cfg(test)]
+mod per_run_font_size_tests {
+    //! `TextRun::font_size`, on the test platform's text system: every char
+    //! advances 0.6 em, ascent is 1.025 em of the largest run.
+    use super::*;
+    use crate::{TestAppContext, TestDispatcher, font, px};
+
+    fn text_system() -> WindowTextSystem {
+        let cx = TestAppContext::build(TestDispatcher::new(0), None);
+        WindowTextSystem::new(cx.text_system().clone())
+    }
+
+    fn run(len: usize, font_size: Option<Pixels>) -> TextRun {
+        TextRun {
+            len,
+            font: font("Dummy"),
+            font_size,
+            ..Default::default()
+        }
+    }
+
+    fn glyph_xs(layout: &LineLayout) -> Vec<f32> {
+        layout
+            .runs
+            .iter()
+            .flat_map(|run| run.glyphs.iter().map(|glyph| f32::from(glyph.position.x)))
+            .collect()
+    }
+
+    #[test]
+    fn smaller_run_has_narrower_advances() {
+        let text_system = text_system();
+        let layout = text_system.layout_line(
+            "aaaabbbb",
+            px(20.),
+            &[run(4, None), run(4, Some(px(10.)))],
+            None,
+        );
+        assert_eq!(
+            glyph_xs(&layout),
+            vec![0., 12., 24., 36., 48., 54., 60., 66.]
+        );
+        assert_eq!(layout.width, px(72.));
+        assert_eq!(layout.font_size, px(20.));
+        let sizes: Vec<_> = layout.runs.iter().map(|run| run.font_size).collect();
+        assert_eq!(sizes, vec![px(20.), px(10.)]);
+        assert_eq!(layout.font_size_for_index(2), Some(px(20.)));
+        assert_eq!(layout.font_size_for_index(6), Some(px(10.)));
+    }
+
+    #[test]
+    fn line_metrics_are_the_maximum_over_runs() {
+        let text_system = text_system();
+        let mixed = text_system.layout_line(
+            "aabb",
+            px(20.),
+            &[run(2, None), run(2, Some(px(10.)))],
+            None,
+        );
+        let uniform = text_system.layout_line("aabb", px(20.), &[run(4, None)], None);
+        assert_eq!(mixed.ascent, uniform.ascent);
+        assert_eq!(mixed.descent, uniform.descent);
+
+        let larger = text_system.layout_line(
+            "aabb",
+            px(20.),
+            &[run(2, None), run(2, Some(px(40.)))],
+            None,
+        );
+        assert_eq!(larger.ascent, px(40. * 1.025));
+    }
+
+    #[test]
+    fn no_size_lays_out_as_before_and_the_cache_keeps_sizes_apart() {
+        let text_system = text_system();
+        let plain = text_system.layout_line("abcdef", px(20.), &[run(6, None)], None);
+        assert_eq!(plain.runs.len(), 1);
+        assert_eq!(plain.runs[0].font_size, px(20.));
+        assert_eq!(glyph_xs(&plain), vec![0., 12., 24., 36., 48., 60.]);
+
+        // A run that asks for the line's own size is the same run as one
+        // without a size: same merged runs, same cache entry.
+        let same_size = text_system.layout_line(
+            "abcdef",
+            px(20.),
+            &[run(3, Some(px(20.))), run(3, None)],
+            None,
+        );
+        assert!(Arc::ptr_eq(&plain, &same_size));
+
+        // Only the run sizes differ: must not reuse the cached layout.
+        let small = text_system.layout_line("abcdef", px(20.), &[run(6, Some(px(10.)))], None);
+        assert!(!Arc::ptr_eq(&plain, &small));
+        assert_eq!(small.width, px(36.));
+    }
+
+    #[test]
+    fn index_and_x_round_trip_across_a_size_change() {
+        let text_system = text_system();
+        let layout = text_system.layout_line(
+            "aaaabbbbcc",
+            px(20.),
+            &[run(4, None), run(4, Some(px(10.))), run(2, None)],
+            None,
+        );
+        for index in 0..layout.len {
+            let x = layout.x_for_index(index);
+            assert_eq!(layout.index_for_x(x), Some(index), "index_for_x at {index}");
+            assert_eq!(layout.closest_index_for_x(x), index, "closest at {index}");
+            // A point inside the glyph's left half is still closest to it
+            // (past the last glyph, closest_index_for_x answers the line end).
+            if index + 1 < layout.len {
+                assert_eq!(
+                    layout.closest_index_for_x(x + px(1.)),
+                    index,
+                    "closest just right of {index}"
+                );
+            }
+        }
+        // Inside a small glyph: 48 + 6 * 1.5 is in the 6th glyph.
+        assert_eq!(layout.index_for_x(px(57.)), Some(5));
+        assert_eq!(layout.x_for_index(layout.len), layout.width);
+        assert_eq!(layout.width, px(4. * 12. + 4. * 6. + 2. * 12.));
+    }
+
+    #[test]
+    fn wrapping_measures_each_run_at_its_size() {
+        let text_system = text_system();
+        let text: SharedString = "aaaa bbbb cccc".into();
+        // 14 chars at 12px = 168px: wraps at 120px.
+        let uniform = text_system
+            .shape_text(
+                text.clone(),
+                px(20.),
+                &[run(14, None)],
+                Some(px(120.)),
+                None,
+            )
+            .unwrap();
+        assert_eq!(uniform[0].wrap_boundaries().len(), 1);
+
+        // "bbbb cccc" at half size: 5 * 12 + 9 * 6 = 114px fits.
+        let mixed = text_system
+            .shape_text(
+                text,
+                px(20.),
+                &[run(5, None), run(9, Some(px(10.)))],
+                Some(px(120.)),
+                None,
+            )
+            .unwrap();
+        assert_eq!(mixed[0].wrap_boundaries().len(), 0);
+        assert_eq!(mixed[0].width(), px(114.));
+
+        let line_height = px(24.);
+        for index in 0..mixed[0].len() {
+            let position = mixed[0].position_for_index(index, line_height).unwrap();
+            assert_eq!(
+                mixed[0].closest_index_for_position(position, line_height),
+                Ok(index),
+                "position round trip at {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn shape_line_carries_run_sizes_to_its_runs() {
+        let text_system = text_system();
+        let line = text_system.shape_line(
+            "aabb".into(),
+            px(20.),
+            &[run(2, None), run(2, Some(px(10.)))],
+            None,
+        );
+        let (left, right) = line.split_at(2);
+        assert_eq!(left.runs[0].font_size, px(20.));
+        assert_eq!(right.runs[0].font_size, px(10.));
+        assert_eq!(right.width(), px(12.));
     }
 }

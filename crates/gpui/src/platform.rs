@@ -1128,25 +1128,48 @@ impl PlatformTextSystem for NoopTextSystem {
         Ok((raster_bounds.size, Vec::new()))
     }
 
-    fn layout_line(&self, text: &str, font_size: Pixels, _runs: &[FontRun]) -> LineLayout {
+    fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout {
         let mut position = px(0.);
         let metrics = self.font_metrics(FontId(0));
-        let em_width = font_size
-            * self
-                .advance(FontId(0), self.glyph_for_char(FontId(0), 'm').unwrap())
-                .unwrap()
-                .width
+        let em_per_pixel = self
+            .advance(FontId(0), self.glyph_for_char(FontId(0), 'm').unwrap())
+            .unwrap()
+            .width
             / metrics.units_per_em as f32;
-        let mut glyphs = Vec::new();
+        // The font size at each byte offset: runs may carry their own size.
+        let mut run_sizes = runs
+            .iter()
+            .scan(0, |end, run| {
+                *end += run.len;
+                Some((*end, run.resolved_font_size(font_size)))
+            })
+            .peekable();
+        let mut max_size = px(0.);
+        let mut shaped_runs: Vec<ShapedRun> = Vec::default();
         for (ix, c) in text.char_indices() {
+            while run_sizes.peek().is_some_and(|(end, _)| *end <= ix) {
+                run_sizes.next();
+            }
+            let size = run_sizes.peek().map_or(font_size, |(_, size)| *size);
+            max_size = max_size.max(size);
+            let em_width = size * em_per_pixel;
             if let Some(glyph) = self.glyph_for_char(FontId(0), c) {
-                glyphs.push(ShapedGlyph {
+                let glyph = ShapedGlyph {
                     id: glyph,
                     position: point(position, px(0.)),
                     index: ix,
                     is_emoji: glyph.0 == 2,
-                });
-                if glyph.0 == 2 {
+                };
+                let is_emoji = glyph.is_emoji;
+                match shaped_runs.last_mut() {
+                    Some(run) if run.font_size == size => run.glyphs.push(glyph),
+                    _ => shaped_runs.push(ShapedRun {
+                        font_id: FontId(0),
+                        font_size: size,
+                        glyphs: vec![glyph],
+                    }),
+                }
+                if is_emoji {
                     position += em_width * 2.0;
                 } else {
                     position += em_width;
@@ -1155,22 +1178,19 @@ impl PlatformTextSystem for NoopTextSystem {
                 position += em_width
             }
         }
-        let mut runs = Vec::default();
-        if !glyphs.is_empty() {
-            runs.push(ShapedRun {
-                font_id: FontId(0),
-                glyphs,
-            });
-        } else {
+        if shaped_runs.is_empty() {
             position = px(0.);
+        }
+        if max_size == px(0.) {
+            max_size = font_size;
         }
 
         LineLayout {
             font_size,
             width: position,
-            ascent: font_size * (metrics.ascent / metrics.units_per_em as f32),
-            descent: font_size * (metrics.descent / metrics.units_per_em as f32),
-            runs,
+            ascent: max_size * (metrics.ascent / metrics.units_per_em as f32),
+            descent: max_size * (metrics.descent / metrics.units_per_em as f32),
+            runs: shaped_runs,
             len: text.len(),
         }
     }
